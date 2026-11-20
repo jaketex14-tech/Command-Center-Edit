@@ -502,6 +502,14 @@
       border: 1px solid #ef4444;
       color: #fca5a5;
     }
+    .btn-partial {
+      background: rgba(245, 158, 11, 0.18);
+      border: 1px solid rgba(245, 158, 11, 0.6);
+      color: #fcd34d;
+    }
+    .btn-partial:active {
+      background: rgba(245, 158, 11, 0.3);
+    }
 
     .badge {
       font-size: 11px;
@@ -608,6 +616,11 @@
       border-color: rgba(5, 150, 105, 0.45);
       background: rgba(5, 150, 105, 0.12);
     }
+    .summary-pill.partial {
+      color: #fcd34d;
+      border-color: rgba(245, 158, 11, 0.45);
+      background: rgba(245, 158, 11, 0.12);
+    }
     .task-expand-pill {
       background: var(--surface);
       border: 1px solid var(--card-border);
@@ -661,6 +674,7 @@
       letter-spacing: 0.6px;
       color: var(--muted);
       margin-bottom: 10px;
+      gap: 8px;
     }
     .checklist-ready-banner {
       background: rgba(5, 150, 105, 0.15);
@@ -707,6 +721,13 @@
     .checklist-item-row.item-done .checklist-item-text {
       text-decoration: line-through;
       color: var(--muted);
+    }
+    .checklist-item-sub {
+      font-size: 11px;
+      color: #fcd34d;
+      margin-top: 2px;
+      text-decoration: none;
+      display: block;
     }
 
     .photo-grid {
@@ -1896,13 +1917,21 @@
           images: normalizeArray(n.images)
         });
       });
+      const normalizedChecklist = normalizeArray(t.checklist).map(function(item) {
+        return Object.assign({}, item, {
+          done: Boolean(item.done),
+          delivered: Boolean(item.delivered),
+          deliveredBy: item.deliveredBy || null,
+          deliveredAt: item.deliveredAt || null
+        });
+      });
       return Object.assign({}, t, {
         urgent: Boolean(t.urgent),
         dueDate: dueDate,
         duePeriod: duePeriod,
         due: t.due || formatFriendlyDueLabel(dueDate, duePeriod, "Today"),
         assignedTo: normalizeArray(t.assignedTo),
-        checklist: normalizeArray(t.checklist),
+        checklist: normalizedChecklist,
         images: normalizeArray(t.images),
         notes: normalizedNotes
       });
@@ -2520,7 +2549,10 @@
                     id: "chk_" + Date.now() + "_" + k,
                     text: scanResult.items[k],
                     done: false,
-                    doneBy: null
+                    doneBy: null,
+                    delivered: false,
+                    deliveredBy: null,
+                    deliveredAt: null
                   });
                 }
                 const task = state.tasks.find(function(t) { return t.id === editingTaskId; });
@@ -2951,7 +2983,10 @@
           id: item.id || ("chk_" + Date.now() + "_" + Math.floor(Math.random() * 1000)),
           text: String(item.text || ""),
           done: Boolean(item.done),
-          doneBy: item.doneBy || null
+          doneBy: item.doneBy || null,
+          delivered: Boolean(item.delivered),
+          deliveredBy: item.deliveredBy || null,
+          deliveredAt: item.deliveredAt || null
         };
       });
 
@@ -2976,6 +3011,17 @@
       if (editDraftChecklist[index]) {
         editDraftChecklist[index].text = newText;
       }
+    }
+
+    function restoreDraftDeliveredItem(index) {
+      if (!editDraftChecklist[index]) return;
+      editDraftChecklist[index].delivered = false;
+      editDraftChecklist[index].deliveredBy = null;
+      editDraftChecklist[index].deliveredAt = null;
+      editDraftChecklist[index].done = false;
+      editDraftChecklist[index].doneBy = null;
+      const task = state.tasks.find(function(t) { return t.id === editingTaskId; });
+      renderEditModalContents(task);
     }
 
     function removeDraftItem(index) {
@@ -3028,9 +3074,16 @@
         container.innerHTML = '<div style="color:var(--muted); font-size:13px; padding:12px 0 16px;">No checklist items yet. Add items below if needed.</div>';
       } else {
         container.innerHTML = editDraftChecklist.map(function(item, idx) {
+          const statusTag = item.delivered
+            ? " (Delivered — Hidden)"
+            : (item.done ? " (Checked Off)" : "");
+          const restoreBtn = item.delivered
+            ? ('<button class="btn btn-secondary" style="padding:10px; margin-bottom:8px;" onclick="restoreDraftDeliveredItem(' + idx + ')">Restore to Active Checklist</button>')
+            : "";
           return '<div class="edit-item-card">' +
-            '<label class="form-label">Item #' + (idx + 1) + (item.done ? " (Checked Off)" : "") + '</label>' +
+            '<label class="form-label">Item #' + (idx + 1) + statusTag + '</label>' +
             '<input type="text" value="' + escapeHtmlAttr(item.text) + '" oninput="updateDraftItemText(' + idx + ', this.value)" />' +
+            restoreBtn +
             '<button class="btn btn-danger-outline" style="padding:12px;" onclick="removeDraftItem(' + idx + ')">Remove Item</button>' +
           '</div>';
         }).join("");
@@ -3092,7 +3145,10 @@
           id: item.id,
           text: String(item.text || "").trim(),
           done: Boolean(item.done),
-          doneBy: item.doneBy || null
+          doneBy: item.doneBy || null,
+          delivered: Boolean(item.delivered),
+          deliveredBy: item.deliveredBy || null,
+          deliveredAt: item.deliveredAt || null
         };
       }).filter(function(item) {
         return item.text.length > 0;
@@ -3232,7 +3288,14 @@
       }
 
       const checklist = extractedItems.map(function(itemText, idx) {
-        return { id: "chk_" + Date.now() + "_" + idx, text: itemText, done: false };
+        return {
+          id: "chk_" + Date.now() + "_" + idx,
+          text: itemText,
+          done: false,
+          delivered: false,
+          deliveredBy: null,
+          deliveredAt: null
+        };
       });
 
       return {
@@ -3265,7 +3328,14 @@
             urgent: false,
             reason: "Scanned " + scanRes.items.length + " items from photo",
             checklist: scanRes.items.map(function(item, idx) {
-              return { id: "chk_" + Date.now() + "_" + idx, text: item, done: false };
+              return {
+                id: "chk_" + Date.now() + "_" + idx,
+                text: item,
+                done: false,
+                delivered: false,
+                deliveredBy: null,
+                deliveredAt: null
+              };
             })
           };
         }
@@ -3326,7 +3396,14 @@
               due: parsed.due || defaultDue || "Today",
               reason: parsed.reason || (parsed.isWorkRelated ? "AI matched work task" : "AI filtered non-work message"),
               checklist: rawList.map(function(item, idx) {
-                return { id: "chk_" + Date.now() + "_" + idx, text: String(item).trim(), done: false };
+                return {
+                  id: "chk_" + Date.now() + "_" + idx,
+                  text: String(item).trim(),
+                  done: false,
+                  delivered: false,
+                  deliveredBy: null,
+                  deliveredAt: null
+                };
               }).filter(function(i) { return Boolean(i.text); })
             };
           }
@@ -3409,7 +3486,14 @@
       const raw = rawChecklistText.trim();
       const parts = raw.indexOf("\n") !== -1 ? raw.split(/\r?\n/) : raw.split(",");
       return parts.map(cleanBulletPrefix).filter(Boolean).map(function(text, idx) {
-        return { id: "chk_" + Date.now() + "_" + Math.floor(Math.random() * 1000) + "_" + idx, text: text, done: false };
+        return {
+          id: "chk_" + Date.now() + "_" + Math.floor(Math.random() * 1000) + "_" + idx,
+          text: text,
+          done: false,
+          delivered: false,
+          deliveredBy: null,
+          deliveredAt: null
+        };
       });
     }
 
@@ -3958,7 +4042,14 @@
         if (scanRes && scanRes.items && scanRes.items.length > 0) {
           if (!title && scanRes.title) title = scanRes.title;
           checklist = scanRes.items.map(function(txt, idx) {
-            return { id: "chk_" + Date.now() + "_" + idx, text: txt, done: false };
+            return {
+              id: "chk_" + Date.now() + "_" + idx,
+              text: txt,
+              done: false,
+              delivered: false,
+              deliveredBy: null,
+              deliveredAt: null
+            };
           });
         }
       }
@@ -4012,11 +4103,12 @@
     function toggleChecklistItem(taskId, itemId) {
       const task = state.tasks.find(function(t) { return t.id === taskId; });
       const actor = getCurrentUser();
-      if (!task || !actor) return;
+      if (!task || !actor || task.completed) return;
 
       const list = normalizeArray(task.checklist);
       for (let i = 0; i < list.length; i++) {
         if (list[i].id === itemId) {
+          if (list[i].delivered) return;
           list[i].done = !list[i].done;
           list[i].doneBy = list[i].done ? actor.name : null;
           break;
@@ -4025,18 +4117,53 @@
       task.checklist = list;
       expandedTaskIds[taskId] = true;
 
-      const total = list.length;
-      const doneCount = list.filter(function(i) { return i.done; }).length;
+      const remaining = list.filter(function(i) { return !i.delivered; });
+      const remainingDone = remaining.filter(function(i) { return i.done; }).length;
 
-      if (total > 0 && doneCount === total) {
+      if (remaining.length > 0 && remainingDone === remaining.length) {
         pushStateToCloud(
           "Checklist Items Ready",
-          "All " + total + " items checked for \"" + task.title + "\" by " + actor.name + ". Ready for final delivery/completion.",
+          "All remaining items (" + remaining.length + ") checked for \"" + task.title + "\" by " + actor.name + ". Ready for final delivery/completion.",
           "ADMINS"
         );
       } else {
         pushStateToCloud();
       }
+    }
+
+    function markCheckedItemsDelivered(taskId) {
+      const task = state.tasks.find(function(t) { return t.id === taskId; });
+      const actor = getCurrentUser();
+      if (!task || !actor || task.completed) return;
+
+      const list = normalizeArray(task.checklist);
+      const now = new Date();
+      const nowStr = now.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+      let newlyDelivered = 0;
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].done && !list[i].delivered) {
+          list[i].delivered = true;
+          list[i].deliveredBy = actor.name;
+          list[i].deliveredAt = nowStr;
+          newlyDelivered++;
+        }
+      }
+
+      if (newlyDelivered === 0) {
+        showBanner("No Items Checked", "Check off the items you are delivering first.");
+        return;
+      }
+
+      task.checklist = list;
+      expandedTaskIds[taskId] = true;
+
+      const remainingCount = list.filter(function(i) { return !i.delivered; }).length;
+      pushStateToCloud(
+        "Partial Delivery Logged",
+        actor.name + " marked " + newlyDelivered + " item(s) delivered on \"" + task.title + "\" (" + remainingCount + " remaining).",
+        "ADMINS"
+      );
     }
 
     function toggleTaskCompletion(taskId) {
@@ -4168,9 +4295,20 @@
       const pills = [];
 
       if (chk.length > 0) {
-        const done = chk.filter(function(i) { return i.done; }).length;
-        const readyCls = (done === chk.length && !task.completed) ? "summary-pill ready" : "summary-pill";
-        pills.push('<span class="' + readyCls + '">Checklist: ' + done + '/' + chk.length + '</span>');
+        if (task.completed) {
+          const done = chk.filter(function(i) { return i.done || i.delivered; }).length;
+          pills.push('<span class="summary-pill">Checklist: ' + done + '/' + chk.length + '</span>');
+        } else {
+          const deliveredCount = chk.filter(function(i) { return i.delivered; }).length;
+          const remaining = chk.filter(function(i) { return !i.delivered; });
+          const doneRemaining = remaining.filter(function(i) { return i.done; }).length;
+          if (deliveredCount > 0) {
+            pills.push('<span class="summary-pill partial">' + deliveredCount + ' Delivered</span>');
+          }
+          const readyCls = (remaining.length > 0 && doneRemaining === remaining.length) ? "summary-pill ready" : "summary-pill";
+          const label = deliveredCount > 0 ? "Remaining: " : "Checklist: ";
+          pills.push('<span class="' + readyCls + '">' + label + doneRemaining + '/' + remaining.length + '</span>');
+        }
       }
       if (totalPhotos > 0) {
         pills.push('<span class="summary-pill">' + totalPhotos + (totalPhotos === 1 ? ' Photo' : ' Photos') + '</span>');
@@ -4188,27 +4326,70 @@
       const list = normalizeArray(task.checklist);
       if (list.length === 0) return "";
 
-      const doneCount = list.filter(function(i) { return i.done; }).length;
-      const allItemsChecked = doneCount === list.length;
+      const deliveredCount = list.filter(function(i) { return i.delivered; }).length;
+      const visibleItems = task.completed
+        ? list
+        : list.filter(function(i) { return !i.delivered; });
 
-      let bannerHtml = "";
-      if (allItemsChecked && !task.completed) {
-        bannerHtml = '<div class="checklist-ready-banner">All Items Checked — Ready for Delivery / Final Completion</div>';
+      const checkedVisibleCount = visibleItems.filter(function(i) { return i.done || i.delivered; }).length;
+      const allVisibleChecked = visibleItems.length > 0 && checkedVisibleCount === visibleItems.length;
+
+      let headerLeft = "Item Checklist";
+      if (!task.completed && deliveredCount > 0) {
+        headerLeft = "Remaining Items (" + deliveredCount + " Delivered &amp; Hidden)";
+      } else if (task.completed && deliveredCount > 0) {
+        headerLeft = "Full Item Checklist (All Loads)";
       }
 
-      const rowsHtml = list.map(function(item) {
-        const rowClass = item.done ? "checklist-item-row item-done" : "checklist-item-row";
-        const mark = item.done ? "✓" : "";
-        return '<div class="' + rowClass + '" onclick="toggleChecklistItem(\'' + task.id + '\', \'' + item.id + '\')">' +
+      let bannerHtml = "";
+      if (!task.completed && visibleItems.length === 0 && deliveredCount > 0) {
+        bannerHtml = '<div class="checklist-ready-banner">All Items Delivered in Partial Loads — Ready to Mark Task Complete</div>';
+      } else if (allVisibleChecked && !task.completed) {
+        bannerHtml = '<div class="checklist-ready-banner">' +
+          (deliveredCount > 0 ? 'All Remaining Items Checked' : 'All Items Checked') +
+          ' — Ready for Delivery / Final Completion</div>';
+      }
+
+      const rowsHtml = visibleItems.map(function(item) {
+        const isChecked = Boolean(item.done || item.delivered);
+        const rowClass = isChecked ? "checklist-item-row item-done" : "checklist-item-row";
+        const mark = isChecked ? "✓" : "";
+        const clickAttr = (task.completed || item.delivered)
+          ? ""
+          : (' onclick="toggleChecklistItem(\'' + task.id + '\', \'' + item.id + '\')"');
+        const deliveredMeta = (task.completed && item.delivered)
+          ? ('<span class="checklist-item-sub">Delivered in partial load' +
+              (item.deliveredBy ? (' by ' + escapeHtmlAttr(item.deliveredBy)) : '') +
+              (item.deliveredAt ? (' • ' + escapeHtmlAttr(item.deliveredAt)) : '') +
+            '</span>')
+          : "";
+
+        return '<div class="' + rowClass + '"' + clickAttr + '>' +
           '<div class="sub-check">' + mark + '</div>' +
-          '<div class="checklist-item-text">' + escapeHtmlAttr(item.text) + '</div>' +
+          '<div class="checklist-item-text">' +
+            escapeHtmlAttr(item.text) +
+            deliveredMeta +
+          '</div>' +
         '</div>';
       }).join("");
 
+      const showPartialBtn =
+        task.visibility === "assigned" &&
+        !task.completed &&
+        checkedVisibleCount > 0 &&
+        checkedVisibleCount < visibleItems.length;
+
+      const partialBtnHtml = showPartialBtn
+        ? ('<button type="button" class="btn btn-partial" style="margin-top:12px; padding:12px; font-size:13px;" onclick="markCheckedItemsDelivered(\'' + task.id + '\')">' +
+            'Mark ' + checkedVisibleCount + ' Checked ' + (checkedVisibleCount === 1 ? 'Item' : 'Items') + ' Delivered &amp; Hide' +
+          '</button>')
+        : "";
+
       return '<div class="checklist-box">' +
-        '<div class="checklist-header"><span>Item Checklist</span><span>' + doneCount + ' / ' + list.length + ' Checked</span></div>' +
+        '<div class="checklist-header"><span>' + headerLeft + '</span><span>' + checkedVisibleCount + ' / ' + visibleItems.length + ' Checked</span></div>' +
         bannerHtml +
         rowsHtml +
+        partialBtnHtml +
       '</div>';
     }
 
