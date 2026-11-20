@@ -98,6 +98,7 @@
       margin-top: 4px;
     }
     .role-admin { background: rgba(37, 99, 235, 0.2); color: #60a5fa; border: 1px solid rgba(37, 99, 235, 0.4); }
+    .role-delegator { background: rgba(139, 92, 246, 0.2); color: #c084fc; border: 1px solid rgba(139, 92, 246, 0.45); }
     .role-member { background: rgba(5, 150, 105, 0.2); color: #34d399; border: 1px solid rgba(5, 150, 105, 0.4); }
 
     .btn-text {
@@ -1164,7 +1165,7 @@
       <button class="btn" onclick="handleLogin()">Sign In</button>
     </section>
 
-    <!-- TAB 1: INBOX & TRIAGE -->
+    <!-- TAB 1: INBOX & TRIAGE (ADMIN ONLY) -->
     <section id="tab-triage" class="hidden">
       <button id="btn-toggle-triage-create" class="dropdown-trigger primary-trigger" onclick="toggleDropdownPanel('triageCreator')">
         <span>+ Create Triage Task / Scan List</span>
@@ -1298,7 +1299,7 @@
       </div>
     </section>
 
-    <!-- TAB 3: SETTINGS (ORDERED: Recovery Tool, 1. Active Users, 2. Add User, 3. Auto Capture, 4. Gemini API Key) -->
+    <!-- TAB 3: SETTINGS (ADMIN ONLY — ORDERED: Recovery Tool, 1. Active Users, 2. Add User, 3. Auto Capture, 4. Gemini API Key) -->
     <section id="tab-team" class="hidden">
       <!-- EMERGENCY LOCAL STORAGE SNAPSHOT RECOVERY TOOL -->
       <button id="btn-toggle-recovery" class="dropdown-trigger recovery-trigger" onclick="toggleDropdownPanel('recoveryScanner')">
@@ -1326,14 +1327,15 @@
 
       <div id="panel-addUser" class="dropdown-panel hidden">
         <div class="card-title">Add User Account</div>
-        <div class="card-desc">Create an account for an Administrator or Team Member.</div>
+        <div class="card-desc">Create an account for an Administrator, Delegator, or Crew Member.</div>
 
         <label class="form-label">Full Name</label>
         <input type="text" id="new-user-name" placeholder="e.g. Ronnie" />
 
         <label class="form-label">Permission Role</label>
         <select id="new-user-role">
-          <option value="member">Team Member (Assigned Tasks Only)</option>
+          <option value="member">Crew / Team Member (Assigned Tasks Only)</option>
+          <option value="delegator">Delegator (Create &amp; Assign Tasks)</option>
           <option value="admin">Administrator (Full Access)</option>
         </select>
 
@@ -1459,6 +1461,29 @@
       workKeywords: "Keith Pratt, Ronnie, Ray, Terry, Bingham, Boice, Advancement Center, City Hall, Bennett, Wheeler",
       ignoredSenders: ""
     };
+
+    /********************************************************************
+     * ROLE HIERARCHY HELPERS (ADMIN > DELEGATOR > CREW)
+     ********************************************************************/
+    function isAdminRole(user) {
+      return Boolean(user && user.role === "admin");
+    }
+
+    function isDelegatorOrAdminRole(user) {
+      return Boolean(user && (user.role === "admin" || user.role === "delegator"));
+    }
+
+    function getRoleDisplayLabel(role) {
+      if (role === "admin") return "Admin";
+      if (role === "delegator") return "Delegator";
+      return "Crew";
+    }
+
+    function getRoleBadgeClass(role) {
+      if (role === "admin") return "role-admin";
+      if (role === "delegator") return "role-delegator";
+      return "role-member";
+    }
 
     function normalizeArray(val) {
       if (!val) return [];
@@ -1883,6 +1908,7 @@
     }
 
     async function restoreSnapshotByIndex(idx) {
+      if (!isAdminRole(getCurrentUser())) return;
       const list = scanAllLocalStorageSnapshots();
       const chosen = list[idx];
       if (!chosen || !chosen.data) return;
@@ -2026,7 +2052,7 @@
     function toggleTaskUrgentDirect(taskId) {
       const task = state.tasks.find(function(t) { return t.id === taskId; });
       const actor = getCurrentUser();
-      if (!task || !actor) return;
+      if (!task || !isDelegatorOrAdminRole(actor)) return;
 
       task.urgent = !task.urgent;
       expandedTaskIds[taskId] = true;
@@ -2246,11 +2272,13 @@
     }
 
     function clearScanLog() {
+      if (!isAdminRole(getCurrentUser())) return;
       localStorage.removeItem(SCAN_LOG_KEY);
       renderScanLog();
     }
 
     function forcePromoteLogItem(logId) {
+      if (!isAdminRole(getCurrentUser())) return;
       const log = getScanLog();
       const item = log.find(function(x) { return x.id === logId; });
       if (!item) return;
@@ -2285,6 +2313,7 @@
     }
 
     function blockSenderFromLog(senderName) {
+      if (!isAdminRole(getCurrentUser())) return;
       const clean = String(senderName || "").trim();
       if (!clean) return;
       const fs = getFilterSettings();
@@ -2333,6 +2362,7 @@
     }
 
     function toggleSourceSetting(key) {
+      if (!isAdminRole(getCurrentUser())) return;
       const fs = getFilterSettings();
       fs[key] = !fs[key];
       state.filterSettings = fs;
@@ -2370,6 +2400,7 @@
     }
 
     function saveFilterSettings() {
+      if (!isAdminRole(getCurrentUser())) return;
       const fs = getFilterSettings();
       const workInput = document.getElementById("filter-work-keywords");
       const ignoredInput = document.getElementById("filter-ignored-senders");
@@ -2419,7 +2450,13 @@
     async function extractChecklistFromPhotosWithGemini(photosArray, statusCallback) {
       const apiKey = (state.geminiApiKey || "").trim();
       if (!apiKey) {
-        showBanner("Gemini API Key Needed", "Open Settings -> Gemini API Key and save your key to scan checklists from photos.");
+        const isAdmin = isAdminRole(getCurrentUser());
+        showBanner(
+          "Gemini API Key Needed",
+          isAdmin
+            ? "Open Settings -> Gemini API Key and save your key to scan checklists from photos."
+            : "Ask an Admin to configure the Gemini API Key in Settings to enable photo checklist scanning."
+        );
         return null;
       }
 
@@ -2863,14 +2900,15 @@
       }
 
       const assignedIds = normalizeArray(task.assignedTo);
-      let targetAudience = "ADMINS";
-      if (actor.role === "admin" && assignedIds.length > 0) {
+      let targetAudience = "MANAGERS";
+      if (isDelegatorOrAdminRole(actor) && assignedIds.length > 0) {
         targetAudience = assignedIds.slice();
       } else if (assignedIds.length > 0) {
-        const adminIds = normalizeArray(state.users)
-          .filter(function(u) { return u.role === "admin"; })
+        const managerIds = normalizeArray(state.users)
+          .filter(function(u) { return isDelegatorOrAdminRole(u); })
           .map(function(u) { return u.id; });
-        targetAudience = adminIds.concat(assignedIds);
+        const combined = managerIds.concat(assignedIds);
+        targetAudience = combined.filter(function(id, idx) { return combined.indexOf(id) === idx; });
       }
 
       const photoDesc = stagedImgs.length > 0 ? (" [" + stagedImgs.length + " photo(s)]") : "";
@@ -2884,6 +2922,7 @@
     }
 
     function deleteTaskNote(taskId, noteId) {
+      if (!isDelegatorOrAdminRole(getCurrentUser())) return;
       const task = state.tasks.find(function(t) { return t.id === taskId; });
       if (!task) return;
       task.notes = normalizeArray(task.notes).filter(function(n) { return n.id !== noteId; });
@@ -2891,7 +2930,7 @@
       pushStateToCloud();
     }
 
-    function renderTaskNotesHtml(task, isAdmin) {
+    function renderTaskNotesHtml(task, canManageTasks) {
       const notes = normalizeArray(task.notes);
       const stagedImgs = normalizeArray(notePendingPhotos[task.id]);
       const isChooserOpen = Boolean(notePhotoSourceOpen[task.id]);
@@ -2899,7 +2938,7 @@
       const notesListHtml = notes.length === 0
         ? '<div style="font-size:13px; color:var(--muted); margin-bottom:6px;">No notes added yet.</div>'
         : notes.map(function(n) {
-            const delBtn = isAdmin
+            const delBtn = canManageTasks
               ? (' <span style="color:#f87171; cursor:pointer; float:right;" onclick="deleteTaskNote(\'' + task.id + '\', \'' + n.id + '\')">Remove</span>')
               : "";
             const noteImgs = normalizeArray(n.images);
@@ -2960,6 +2999,7 @@
     }
 
     function openEditModal(taskId) {
+      if (!isDelegatorOrAdminRole(getCurrentUser())) return;
       const task = state.tasks.find(function(t) { return t.id === taskId; });
       if (!task) return;
 
@@ -3097,7 +3137,7 @@
           const isSel = editDraftAssignees.indexOf(u.id) !== -1;
           const rowCls = isSel ? "user-pick-row selected" : "user-pick-row";
           return '<div class="' + rowCls + '" onclick="toggleEditAssignee(\'' + u.id + '\')">' +
-            '<span>' + escapeHtmlAttr(u.name) + ' (' + (u.role || "member").toUpperCase() + ')</span>' +
+            '<span>' + escapeHtmlAttr(u.name) + ' (' + getRoleDisplayLabel(u.role).toUpperCase() + ')</span>' +
             '<div class="pick-indicator">' + (isSel ? "✓" : "") + '</div>' +
           '</div>';
         }).join("");
@@ -3113,7 +3153,7 @@
 
       const task = state.tasks.find(function(t) { return t.id === editingTaskId; });
       const actor = getCurrentUser();
-      if (!task || !actor) return;
+      if (!task || !isDelegatorOrAdminRole(actor)) return;
 
       const pendingNewText = (document.getElementById("edit-new-items-input").value || "").trim();
       if (pendingNewText) {
@@ -3502,6 +3542,7 @@
     }
 
     function openNativeCaptureSettings() {
+      if (!isAdminRole(getCurrentUser())) return;
       if (hasNativeBridge()) {
         window.AndroidNative.openCaptureSettings();
       } else {
@@ -3518,7 +3559,7 @@
       }
       if (!hasCompletedInitialCloudPull) return;
       const user = getCurrentUser();
-      if (!user || user.role !== "admin") return;
+      if (!isAdminRole(user)) return;
 
       try {
         const enabled = window.AndroidNative.isCaptureEnabled();
@@ -3632,6 +3673,7 @@
     }
 
     async function handleManualAnalyze() {
+      if (!isAdminRole(getCurrentUser())) return;
       const inputEl = document.getElementById("triage-manual-input");
       const sourceEl = document.getElementById("triage-source-select");
       const feedbackEl = document.getElementById("analyze-feedback");
@@ -3872,7 +3914,8 @@
         notifObj.target === "ALL" ||
         targets.indexOf(user.id) !== -1 ||
         notifObj.target === user.id ||
-        (notifObj.target === "ADMINS" && user.role === "admin");
+        (notifObj.target === "ADMINS" && isAdminRole(user)) ||
+        (notifObj.target === "MANAGERS" && isDelegatorOrAdminRole(user));
 
       if (!isTargetedToMe && !isLocalAction) return;
 
@@ -3926,7 +3969,7 @@
       localStorage.setItem(SESSION_USER_KEY, currentUserId);
       document.getElementById("login-pin").value = "";
 
-      if (userAccount.role !== "admin") activeTab = "tasks";
+      if (!isAdminRole(userAccount)) activeTab = "tasks";
       renderAll();
       pollNativePhoneCaptures(false);
     }
@@ -3942,7 +3985,7 @@
 
     function switchTab(tabName) {
       const user = getCurrentUser();
-      if (!user || (user.role !== "admin" && tabName !== "tasks")) return;
+      if (!user || (!isAdminRole(user) && tabName !== "tasks")) return;
       activeTab = tabName;
       renderAll();
     }
@@ -3964,13 +4007,14 @@
         const isSel = creatorSelectedUsers.indexOf(u.id) !== -1;
         const rowCls = isSel ? "user-pick-row selected" : "user-pick-row";
         return '<div class="' + rowCls + '" onclick="toggleCreatorUser(\'' + u.id + '\')">' +
-          '<span>' + escapeHtmlAttr(u.name) + ' (' + (u.role || "member").toUpperCase() + ')</span>' +
+          '<span>' + escapeHtmlAttr(u.name) + ' (' + getRoleDisplayLabel(u.role).toUpperCase() + ')</span>' +
           '<div class="pick-indicator">' + (isSel ? "✓" : "") + '</div>' +
         '</div>';
       }).join("");
     }
 
     function toggleTriageUser(taskId, userId) {
+      if (!isAdminRole(getCurrentUser())) return;
       const current = triageSelections[taskId] ? triageSelections[taskId].slice() : [];
       const idx = current.indexOf(userId);
       if (idx !== -1) {
@@ -3984,11 +4028,12 @@
     }
 
     function assignTriageItem(taskId) {
+      const adminUser = getCurrentUser();
+      if (!isAdminRole(adminUser)) return;
       const selectedIds = triageSelections[taskId] || [];
       const task = state.tasks.find(function(t) { return t.id === taskId; });
-      const adminUser = getCurrentUser();
 
-      if (!task || selectedIds.length === 0 || !adminUser) {
+      if (!task || selectedIds.length === 0) {
         showBanner("Select Assignee", "Tap at least one team member before assigning.");
         return;
       }
@@ -4003,12 +4048,16 @@
     }
 
     function dismissTriageItem(taskId) {
+      if (!isAdminRole(getCurrentUser())) return;
       state.tasks = state.tasks.filter(function(t) { return t.id !== taskId; });
       delete triageSelections[taskId];
       pushStateToCloud();
     }
 
     async function createAndAssignTask() {
+      const actor = getCurrentUser();
+      if (!isDelegatorOrAdminRole(actor)) return;
+
       const titleInput = document.getElementById("new-task-title");
       const checklistInput = document.getElementById("new-task-checklist");
       const createBtn = document.getElementById("btn-create-task");
@@ -4057,7 +4106,6 @@
       if (!title) title = "Material List Task";
 
       const isUrgent = Boolean(creatorUrgent || detectUrgentKeyword(title));
-      const adminUser = getCurrentUser();
       const dueDate = calState.creator.date || getTodayIso();
       const duePeriod = calState.creator.period || "AM";
       const due = formatFriendlyDueLabel(dueDate, duePeriod, "Today");
@@ -4078,7 +4126,7 @@
         notes: [],
         visibility: "assigned",
         assignedTo: assignedIds,
-        createdBy: adminUser.id,
+        createdBy: actor.id,
         completed: false,
         completedBy: null,
         completedAt: null,
@@ -4124,7 +4172,7 @@
         pushStateToCloud(
           "Checklist Items Ready",
           "All remaining items (" + remaining.length + ") checked for \"" + task.title + "\" by " + actor.name + ". Ready for final delivery/completion.",
-          "ADMINS"
+          "MANAGERS"
         );
       } else {
         pushStateToCloud();
@@ -4162,7 +4210,7 @@
       pushStateToCloud(
         "Partial Delivery Logged",
         actor.name + " marked " + newlyDelivered + " item(s) delivered on \"" + task.title + "\" (" + remainingCount + " remaining).",
-        "ADMINS"
+        "MANAGERS"
       );
     }
 
@@ -4180,16 +4228,17 @@
         task.completedAt = nowStr;
         task.completedTimestamp = Date.now();
         expandedTaskIds[taskId] = false;
-        pushStateToCloud("Task Delivered & Completed", "\"" + task.title + "\" marked complete by " + actor.name + " at " + nowStr + ".", "ADMINS");
+        pushStateToCloud("Task Delivered & Completed", "\"" + task.title + "\" marked complete by " + actor.name + " at " + nowStr + ".", "MANAGERS");
       } else {
         task.completedBy = null;
         task.completedAt = null;
         task.completedTimestamp = null;
-        pushStateToCloud("Task Re-Opened", "\"" + task.title + "\" reopened by " + actor.name + ".", "ADMINS");
+        pushStateToCloud("Task Re-Opened", "\"" + task.title + "\" reopened by " + actor.name + ".", "MANAGERS");
       }
     }
 
     function clearAllCompletedTasks() {
+      if (!isAdminRole(getCurrentUser())) return;
       const completedCount = state.tasks.filter(function(t) { return t.visibility === "assigned" && t.completed; }).length;
       if (completedCount === 0) return;
       state.tasks = state.tasks.filter(function(t) { return !(t.visibility === "assigned" && t.completed); });
@@ -4198,11 +4247,13 @@
     }
 
     function deleteTask(taskId) {
+      if (!isDelegatorOrAdminRole(getCurrentUser())) return;
       state.tasks = state.tasks.filter(function(t) { return t.id !== taskId; });
       pushStateToCloud();
     }
 
     function saveGeminiKey() {
+      if (!isAdminRole(getCurrentUser())) return;
       const keyInput = document.getElementById("gemini-key-input");
       state.geminiApiKey = keyInput.value.trim();
       preferredWorkingModel = null;
@@ -4212,6 +4263,7 @@
     }
 
     function addNewUser() {
+      if (!isAdminRole(getCurrentUser())) return;
       const nameInput = document.getElementById("new-user-name");
       const roleSelect = document.getElementById("new-user-role");
       const pinInput = document.getElementById("new-user-pin");
@@ -4219,19 +4271,41 @@
       const pin = pinInput.value.trim() || "1234";
       if (!name) return;
 
+      const selectedRole = (roleSelect.value === "admin" || roleSelect.value === "delegator") ? roleSelect.value : "member";
+
       state.users.push({
         id: "u_" + Date.now(),
         name: name,
-        role: roleSelect.value,
+        role: selectedRole,
         pin: pin
       });
       nameInput.value = "";
       nameInput.blur();
       toggleDropdownPanel("addUser", false);
-      pushStateToCloud("Account Created", "New account created for " + name + ".", "ADMINS");
+      pushStateToCloud("Account Created", "New " + getRoleDisplayLabel(selectedRole) + " account created for " + name + ".", "ADMINS");
+    }
+
+    function updateUserRole(userId, newRole) {
+      const actor = getCurrentUser();
+      if (!isAdminRole(actor) || userId === actor.id) return;
+      if (newRole !== "admin" && newRole !== "delegator" && newRole !== "member") return;
+
+      const target = state.users.find(function(u) { return u.id === userId; });
+      if (!target || target.role === newRole) return;
+
+      target.role = newRole;
+      if (document.activeElement && typeof document.activeElement.blur === "function") {
+        document.activeElement.blur();
+      }
+      pushStateToCloud(
+        "Role Updated",
+        target.name + " is now assigned the " + getRoleDisplayLabel(newRole) + " role.",
+        "ADMINS"
+      );
     }
 
     function removeUser(userId) {
+      if (!isAdminRole(getCurrentUser())) return;
       if (state.users.length <= 1) return;
       state.users = state.users.filter(function(u) { return u.id !== userId; });
       pushStateToCloud();
@@ -4437,7 +4511,7 @@
       '</div>';
     }
 
-    function renderTaskCardHtml(t, isAdmin) {
+    function renderTaskCardHtml(t, canManageTasks) {
       const isExpanded = Boolean(expandedTaskIds[t.id]);
       const hasChecklist = normalizeArray(t.checklist).length > 0;
       const completeBtnText = t.completed
@@ -4454,7 +4528,7 @@
       const urgentToggleBtnText = t.urgent ? "Remove Urgent Priority" : "Pin as Urgent / High-Priority";
       const urgentToggleBtnCls = t.urgent ? "btn btn-urgent-active" : "btn btn-secondary";
 
-      const adminButtonsHtml = isAdmin
+      const managerButtonsHtml = canManageTasks
         ? ((!t.completed ? ('<button class="' + urgentToggleBtnCls + '" onclick="toggleTaskUrgentDirect(\'' + t.id + '\')">' + urgentToggleBtnText + '</button>') : "") +
            '<button class="btn btn-secondary" onclick="openEditModal(\'' + t.id + '\')">Edit Task, Schedule &amp; Checklist</button>' +
            '<button class="btn btn-danger-outline" onclick="deleteTask(\'' + t.id + '\')">Delete Task</button>')
@@ -4473,11 +4547,11 @@
           '<div class="task-accordion-body">' +
             renderTaskPhotosHtml(t) +
             renderChecklistHtml(t) +
-            renderTaskNotesHtml(t, isAdmin) +
+            renderTaskNotesHtml(t, canManageTasks) +
             statusHtml +
             '<div class="btn-stack" style="margin-top: 4px;">' +
               '<button class="' + btnCls + '" onclick="toggleTaskCompletion(\'' + t.id + '\')">' + completeBtnText + '</button>' +
-              adminButtonsHtml +
+              managerButtonsHtml +
             '</div>' +
           '</div>'
         ) : '') +
@@ -4494,7 +4568,7 @@
       if (document.activeElement !== loginSelect) {
         const prevLoginSel = loginSelect.value;
         loginSelect.innerHTML = state.users.map(function(u) {
-          const roleLabel = (u.role || "member").toUpperCase();
+          const roleLabel = getRoleDisplayLabel(u.role).toUpperCase();
           return '<option value="' + u.id + '">' + escapeHtmlAttr(u.name) + ' (' + roleLabel + ')</option>';
         }).join("");
         if (prevLoginSel && state.users.some(function(u) { return u.id === prevLoginSel; })) {
@@ -4514,19 +4588,24 @@
       }
 
       document.getElementById("login-screen").classList.add("hidden");
-      const isAdmin = user.role === "admin";
+      const isAdmin = isAdminRole(user);
+      const isDelegatorOrAdmin = isDelegatorOrAdminRole(user);
+
+      if (!isAdmin && activeTab !== "tasks") {
+        activeTab = "tasks";
+      }
 
       document.getElementById("app-header").classList.remove("hidden");
       document.getElementById("bottom-nav").classList.remove("hidden");
       document.getElementById("header-username").textContent = user.name;
       const roleBadge = document.getElementById("header-role-badge");
-      roleBadge.textContent = isAdmin ? "Admin" : "Member";
-      roleBadge.className = "role-tag " + (isAdmin ? "role-admin" : "role-member");
+      roleBadge.textContent = getRoleDisplayLabel(user.role);
+      roleBadge.className = "role-tag " + getRoleBadgeClass(user.role);
 
       document.getElementById("nav-triage").classList.toggle("hidden", !isAdmin);
       document.getElementById("nav-team").classList.toggle("hidden", !isAdmin);
-      document.getElementById("admin-task-creator-wrap").classList.toggle("hidden", !isAdmin);
-      document.getElementById("admin-filter-bar").classList.toggle("hidden", !isAdmin);
+      document.getElementById("admin-task-creator-wrap").classList.toggle("hidden", !isDelegatorOrAdmin);
+      document.getElementById("admin-filter-bar").classList.toggle("hidden", !isDelegatorOrAdmin);
 
       document.getElementById("tab-triage").classList.toggle("hidden", !(isAdmin && activeTab === "triage"));
       document.getElementById("tab-tasks").classList.toggle("hidden", activeTab !== "tasks");
@@ -4543,10 +4622,12 @@
         if (chipEl) chipEl.classList.toggle("active", taskSortMode === sortModes[sm]);
       }
 
-      if (isAdmin) {
+      if (isDelegatorOrAdmin) {
         renderCreatorUserGrid();
         syncUrgentToggleUI();
+      }
 
+      if (isAdmin) {
         const keyTriggerLabel = document.getElementById("gemini-key-trigger-label");
         if (keyTriggerLabel) {
           keyTriggerLabel.innerHTML = state.geminiApiKey
@@ -4592,7 +4673,7 @@
         }).join("");
       }
 
-      if (isAdmin) {
+      if (isDelegatorOrAdmin) {
         const chips = [{ id: "ALL", label: "All Users" }].concat(state.users.map(function(u) {
           return { id: u.id, label: u.name };
         }));
@@ -4603,7 +4684,7 @@
       }
 
       let visibleTasks = state.tasks.filter(function(t) { return t.visibility === "assigned"; });
-      if (!isAdmin) {
+      if (!isDelegatorOrAdmin) {
         visibleTasks = visibleTasks.filter(function(t) {
           const list = normalizeArray(t.assignedTo);
           return list.indexOf(user.id) !== -1;
@@ -4653,12 +4734,12 @@
             lastDateKey = dKey;
             groupedHtml += '<div class="day-group-header">' + escapeHtmlAttr(formatDayHeading(dKey)) + '</div>';
           }
-          groupedHtml += renderTaskCardHtml(t, isAdmin);
+          groupedHtml += renderTaskCardHtml(t, isDelegatorOrAdmin);
         }
         tasksListEl.innerHTML = groupedHtml;
       } else {
         tasksListEl.innerHTML = activeTasks.map(function(t) {
-          return renderTaskCardHtml(t, isAdmin);
+          return renderTaskCardHtml(t, isDelegatorOrAdmin);
         }).join("");
       }
 
@@ -4677,25 +4758,39 @@
           completedListEl.innerHTML = '<div style="text-align:center; color:var(--muted); font-size:13px; padding:14px 0;">No completed tasks in archive.</div>';
         } else {
           completedListEl.innerHTML = completedTasks.map(function(t) {
-            return renderTaskCardHtml(t, isAdmin);
+            return renderTaskCardHtml(t, isDelegatorOrAdmin);
           }).join("");
         }
       }
 
       if (isAdmin) {
         document.getElementById("team-list").innerHTML = state.users.map(function(u) {
-          const roleCls = u.role === "admin" ? "role-tag role-admin" : "role-tag role-member";
-          const removeBtn = u.id !== user.id
+          const currentRole = (u.role === "admin" || u.role === "delegator") ? u.role : "member";
+          const roleCls = "role-tag " + getRoleBadgeClass(currentRole);
+          const isSelf = u.id === user.id;
+
+          const roleControlHtml = !isSelf
+            ? ('<label class="form-label" style="margin-bottom:6px;">Permission Role</label>' +
+               '<select style="margin-bottom:10px; padding:12px 14px;" onchange="updateUserRole(\'' + u.id + '\', this.value)">' +
+                 '<option value="member"' + (currentRole === "member" ? " selected" : "") + '>Crew / Team Member</option>' +
+                 '<option value="delegator"' + (currentRole === "delegator" ? " selected" : "") + '>Delegator (Create &amp; Assign Tasks)</option>' +
+                 '<option value="admin"' + (currentRole === "admin" ? " selected" : "") + '>Administrator (Full Access)</option>' +
+               '</select>')
+            : "";
+
+          const removeBtn = !isSelf
             ? ('<button class="btn btn-danger-outline" onclick="removeUser(\'' + u.id + '\')">Remove Account</button>')
             : "";
+
           return '<div class="card">' +
             '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">' +
               '<div>' +
                 '<div style="font-weight:600; font-size:16px; margin-bottom:4px;">' + escapeHtmlAttr(u.name) + '</div>' +
                 '<div style="font-size:13px; color:var(--muted);">PIN: ' + escapeHtmlAttr(u.pin || "1234") + '</div>' +
               '</div>' +
-              '<span class="' + roleCls + '">' + (u.role || "member").toUpperCase() + '</span>' +
+              '<span class="' + roleCls + '">' + getRoleDisplayLabel(currentRole).toUpperCase() + '</span>' +
             '</div>' +
+            roleControlHtml +
             removeBtn +
           '</div>';
         }).join("");
