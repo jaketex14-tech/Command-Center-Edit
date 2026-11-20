@@ -1,0 +1,490 @@
+name: Build Android APK & Deploy iPhone Web App
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  # JOB 1: Host the iPhone / Cross-Platform Web App on GitHub Pages
+  deploy-pwa:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Web App folder
+        run: |
+          mkdir -p www
+          cp index.html www/index.html
+          sed -i "s|PLACEHOLDER_FIREBASE_URL|${{ secrets.FIREBASE_URL }}|g" www/index.html
+          cp manifest.json www/ 2>/dev/null || true
+          cp sw.js www/ 2>/dev/null || true
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Web App files
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './www'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # JOB 2: Compile Native Android APK with Notification, Calendar & Direct Camera Stream Support
+  build-android-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Java JDK 21 for Android Gradle
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Generate Native Android Project & Background Harvesters
+        run: |
+          mkdir -p www
+          cp index.html www/index.html
+          sed -i "s|PLACEHOLDER_FIREBASE_URL|${{ secrets.FIREBASE_URL }}|g" www/index.html
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          echo '{"appId":"com.commandcenter.v2","appName":"Command Center","webDir":"www"}' > capacitor.config.json
+          npx cap add android
+          npx cap sync android
+
+          # 1. Configure AndroidManifest permissions (Including CAMERA), NotificationListenerService & versionCode
+          sed -i 's/NoActionBarLaunch/NoActionBar/g' android/app/src/main/AndroidManifest.xml
+          sed -i 's/allowBackup="true"/allowBackup="false"/g' android/app/src/main/AndroidManifest.xml
+          sed -i 's/<application/<uses-permission android:name="android.permission.POST_NOTIFICATIONS" \/>\n    <uses-permission android:name="android.permission.VIBRATE" \/>\n    <uses-permission android:name="android.permission.READ_CALENDAR" \/>\n    <uses-permission android:name="android.permission.CAMERA" \/>\n    <uses-feature android:name="android.hardware.camera" android:required="false" \/>\n    <application/g' android/app/src/main/AndroidManifest.xml
+          sed -i 's/<\/application>/    <service android:name=".CaptureService" android:label="Command Center Auto-Capture" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" android:exported="true">\n            <intent-filter>\n                <action android:name="android.service.notification.NotificationListenerService" \/>\n            <\/intent-filter>\n        <\/service>\n    <\/application>/g' android/app/src/main/AndroidManifest.xml
+          sed -i 's/versionCode 1/versionCode ${{ github.run_number }}/g' android/app/build.gradle
+          sed -i 's/versionName "1.0"/versionName "1.${{ github.run_number }}"/g' android/app/build.gradle
+
+          # 2. Inject Custom Adaptive Launcher Icon
+          rm -rf android/app/src/main/res/drawable-v24
+          cat << 'EOF' > android/app/src/main/res/drawable/ic_launcher_background.xml
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#0F172A" android:pathData="M0,0h108v108h-108z"/>
+          </vector>
+          EOF
+
+          cat << 'EOF' > android/app/src/main/res/drawable/ic_launcher_foreground.xml
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#3B82F6" android:pathData="M54,26 A28,28 0 1,0 54,82 A28,28 0 1,0 54,26 Z"/>
+              <path android:fillColor="#10B981" android:pathData="M54,26 A28,28 0 0,1 54,82 Z"/>
+              <path android:fillColor="#0F172A" android:pathData="M54,34 A20,20 0 1,0 54,74 A20,20 0 1,0 54,34 Z"/>
+              <path android:fillColor="#F8FAFC" android:pathData="M44,54 L51,61 L65,47 L61,43 L51,53 L48,50 Z"/>
+          </vector>
+          EOF
+
+          cat << 'EOF' > android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_launcher_background"/>
+              <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+          </adaptive-icon>
+          EOF
+          cp android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+          # 3. Create Background Notification Listener for SMS, Samsung Reminders & Google Tasks
+          cat << 'EOF' > android/app/src/main/java/com/commandcenter/v2/CaptureService.java
+          package com.commandcenter.v2;
+
+          import android.app.Notification;
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+          import android.service.notification.NotificationListenerService;
+          import android.service.notification.StatusBarNotification;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          public class CaptureService extends NotificationListenerService {
+              @Override
+              public void onNotificationPosted(StatusBarNotification sbn) {
+                  try {
+                      if (sbn == null || sbn.isOngoing()) return;
+                      String pkg = sbn.getPackageName();
+                      if (pkg == null) return;
+
+                      Notification notif = sbn.getNotification();
+                      if (notif == null) return;
+                      if ((notif.flags & Notification.FLAG_GROUP_SUMMARY) != 0) return;
+
+                      String sourceType = null;
+                      if (pkg.contains("messaging") || pkg.contains("mms") || pkg.equals("com.samsung.android.messaging")) {
+                          sourceType = "SMS";
+                      } else if (pkg.contains("reminder") || pkg.contains("tasks") || pkg.contains("todos")) {
+                          sourceType = "SAMSUNG";
+                      } else if (pkg.contains("calendar")) {
+                          sourceType = "CAL";
+                      }
+
+                      if (sourceType == null) return;
+
+                      Bundle extras = notif.extras;
+                      if (extras == null) return;
+
+                      CharSequence titleCs = extras.getCharSequence(Notification.EXTRA_TITLE);
+                      CharSequence bigTextCs = extras.getCharSequence(Notification.EXTRA_BIG_TEXT);
+                      CharSequence textCs = extras.getCharSequence(Notification.EXTRA_TEXT);
+
+                      String title = titleCs != null ? titleCs.toString().trim() : "";
+                      String body = bigTextCs != null ? bigTextCs.toString().trim() : (textCs != null ? textCs.toString().trim() : "");
+
+                      if (body.isEmpty() && title.isEmpty()) return;
+
+                      String combined = title.isEmpty() ? body : (body.isEmpty() ? title : title + ": " + body);
+                      String sig = sourceType + "|" + combined;
+
+                      SharedPreferences prefs = getSharedPreferences("cc_captures", MODE_PRIVATE);
+                      String lastSig = prefs.getString("last_sig", "");
+                      long lastTime = prefs.getLong("last_time", 0);
+                      long now = System.currentTimeMillis();
+
+                      if (sig.equals(lastSig) && (now - lastTime) < 60000) return;
+
+                      String rawQueue = prefs.getString("queue", "[]");
+                      JSONArray arr = new JSONArray(rawQueue);
+
+                      JSONObject item = new JSONObject();
+                      item.put("id", "cap_" + now);
+                      item.put("source", sourceType);
+                      item.put("sender", title);
+                      item.put("text", body.isEmpty() ? title : body);
+                      item.put("combined", combined);
+                      item.put("timestamp", now);
+
+                      arr.put(item);
+
+                      prefs.edit()
+                          .putString("queue", arr.toString())
+                          .putString("last_sig", sig)
+                          .putLong("last_time", now)
+                          .apply();
+                  } catch (Exception ignored) {}
+              }
+          }
+          EOF
+
+          # 4. Write MainActivity with Notification Bridge, Camera Stream Permission Grant & Calendar Reader
+          cat << 'EOF' > android/app/src/main/java/com/commandcenter/v2/MainActivity.java
+          package com.commandcenter.v2;
+
+          import android.Manifest;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.content.ContentUris;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
+          import android.database.Cursor;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.CalendarContract;
+          import android.provider.Settings;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.PermissionRequest;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import androidx.appcompat.app.AppCompatActivity;
+          import androidx.core.app.NotificationCompat;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+
+          public class MainActivity extends AppCompatActivity {
+              private WebView webView;
+              private ValueCallback<Uri[]> filePathCallback;
+              private static final int FILE_CHOOSER_RESULT_CODE = 105;
+              private static final int CAMERA_PERMISSION_REQUEST_CODE = 1002;
+              private static final String CHANNEL_ID = "command_center_alerts";
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  createNotificationChannel();
+                  requestRuntimePermissions();
+
+                  webView = new WebView(this);
+                  webView.setBackgroundColor(0xFF0B0F19);
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setAllowFileAccess(true);
+                  settings.setAllowContentAccess(true);
+                  settings.setAllowUniversalAccessFromFileURLs(true);
+                  settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+
+                  webView.clearCache(true);
+                  webView.addJavascriptInterface(new AndroidBridge(this), "AndroidNative");
+                  webView.setWebViewClient(new WebViewClient());
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onPermissionRequest(final PermissionRequest request) {
+                          runOnUiThread(new Runnable() {
+                              @Override
+                              public void run() {
+                                  String[] resources = request.getResources();
+                                  boolean wantsCamera = false;
+                                  for (String r : resources) {
+                                      if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)) {
+                                          wantsCamera = true;
+                                          break;
+                                      }
+                                  }
+                                  if (wantsCamera) {
+                                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                                          checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                                          requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST_CODE);
+                                      } else {
+                                          request.grant(resources);
+                                      }
+                                  } else {
+                                      request.grant(resources);
+                                  }
+                              }
+                          });
+                      }
+
+                      @Override
+                      public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
+                          if (MainActivity.this.filePathCallback != null) {
+                              MainActivity.this.filePathCallback.onReceiveValue(null);
+                          }
+                          MainActivity.this.filePathCallback = filePathCallback;
+                          Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                          intent.addCategory(Intent.CATEGORY_OPENABLE);
+                          intent.setType("image/*");
+                          intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                          startActivityForResult(Intent.createChooser(intent, "Select Photo"), FILE_CHOOSER_RESULT_CODE);
+                          return true;
+                      }
+                  });
+                  setContentView(webView);
+                  webView.loadUrl("file:///android_asset/public/index.html?v=" + System.currentTimeMillis());
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+                  if (requestCode == CAMERA_PERMISSION_REQUEST_CODE) {
+                      // Reload or allow camera stream if granted
+                  }
+              }
+
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode == FILE_CHOOSER_RESULT_CODE) {
+                      if (filePathCallback == null) return;
+                      Uri[] results = null;
+                      if (resultCode == RESULT_OK && data != null) {
+                          if (data.getClipData() != null) {
+                              int count = data.getClipData().getItemCount();
+                              results = new Uri[count];
+                              for (int i = 0; i < count; i++) {
+                                  results[i] = data.getClipData().getItemAt(i).getUri();
+                              }
+                          } else if (data.getData() != null) {
+                              results = new Uri[]{ data.getData() };
+                          }
+                      }
+                      filePathCallback.onReceiveValue(results);
+                      filePathCallback = null;
+                  }
+              }
+
+              private void requestRuntimePermissions() {
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                          requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS", "android.permission.READ_CALENDAR", "android.permission.CAMERA"}, 101);
+                      }
+                  } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                          requestPermissions(new String[]{Manifest.permission.CAMERA}, 101);
+                      }
+                  }
+              }
+
+              private void createNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationChannel channel = new NotificationChannel(
+                          CHANNEL_ID,
+                          "Command Center Task Alerts",
+                          NotificationManager.IMPORTANCE_HIGH
+                      );
+                      channel.setDescription("Real-time task assignment and completion alerts");
+                      NotificationManager manager = getSystemService(NotificationManager.class);
+                      if (manager != null) {
+                          manager.createNotificationChannel(channel);
+                      }
+                  }
+              }
+
+              public class AndroidBridge {
+                  Context mContext;
+                  AndroidBridge(Context c) { mContext = c; }
+
+                  @JavascriptInterface
+                  public void sendNotification(String title, String body) {
+                      Intent intent = new Intent(mContext, MainActivity.class);
+                      intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                      PendingIntent pendingIntent = PendingIntent.getActivity(
+                          mContext, 0, intent,
+                          PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                      );
+
+                      NotificationCompat.Builder builder = new NotificationCompat.Builder(mContext, CHANNEL_ID)
+                          .setSmallIcon(android.R.drawable.ic_dialog_info)
+                          .setContentTitle(title)
+                          .setContentText(body)
+                          .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
+                          .setPriority(NotificationCompat.PRIORITY_HIGH)
+                          .setDefaults(NotificationCompat.DEFAULT_ALL)
+                          .setAutoCancel(true)
+                          .setContentIntent(pendingIntent);
+
+                      NotificationManager manager = (NotificationManager) mContext.getSystemService(Context.NOTIFICATION_SERVICE);
+                      if (manager != null) {
+                          manager.notify((int) (System.currentTimeMillis() % 100000), builder.build());
+                      }
+                  }
+
+                  @JavascriptInterface
+                  public boolean isCaptureEnabled() {
+                      String flat = Settings.Secure.getString(mContext.getContentResolver(), "enabled_notification_listeners");
+                      return flat != null && flat.contains(mContext.getPackageName());
+                  }
+
+                  @JavascriptInterface
+                  public void openCaptureSettings() {
+                      Intent intent = new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS");
+                      intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      mContext.startActivity(intent);
+                  }
+
+                  @JavascriptInterface
+                  public String getPendingCaptures() {
+                      SharedPreferences prefs = mContext.getSharedPreferences("cc_captures", MODE_PRIVATE);
+                      String queue = prefs.getString("queue", "[]");
+                      prefs.edit().putString("queue", "[]").apply();
+                      return queue;
+                  }
+
+                  @JavascriptInterface
+                  public String syncCalendarEvents() {
+                      JSONArray results = new JSONArray();
+                      try {
+                          if (Build.VERSION.SDK_INT >= 23 && mContext.checkSelfPermission("android.permission.READ_CALENDAR") != PackageManager.PERMISSION_GRANTED) {
+                              requestPermissions(new String[]{"android.permission.READ_CALENDAR"}, 102);
+                              return "[]";
+                          }
+
+                          SharedPreferences prefs = mContext.getSharedPreferences("cc_captures", MODE_PRIVATE);
+                          String seenIds = prefs.getString("seen_cal_ids", ",");
+
+                          long now = System.currentTimeMillis();
+                          long endWindow = now + (48L * 60L * 60L * 1000L);
+
+                          Uri.Builder builder = CalendarContract.Instances.CONTENT_URI.buildUpon();
+                          ContentUris.appendId(builder, now);
+                          ContentUris.appendId(builder, endWindow);
+
+                          String[] projection = new String[]{
+                              CalendarContract.Instances.EVENT_ID,
+                              CalendarContract.Instances.TITLE,
+                              CalendarContract.Instances.DESCRIPTION,
+                              CalendarContract.Instances.BEGIN
+                          };
+
+                          Cursor cursor = mContext.getContentResolver().query(builder.build(), projection, null, null, CalendarContract.Instances.BEGIN + " ASC");
+                          if (cursor != null) {
+                              SimpleDateFormat sdf = new SimpleDateFormat("EEE h:mm a", Locale.US);
+                              StringBuilder updatedSeen = new StringBuilder(seenIds);
+
+                              while (cursor.moveToNext()) {
+                                  long eventId = cursor.getLong(0);
+                                  String title = cursor.getString(1);
+                                  String desc = cursor.getString(2);
+                                  long begin = cursor.getLong(3);
+
+                                  String key = "," + eventId + "_" + begin + ",";
+                                  if (updatedSeen.indexOf(key) != -1) continue;
+                                  updatedSeen.append(eventId).append("_").append(begin).append(",");
+
+                                  JSONObject ev = new JSONObject();
+                                  ev.put("id", "cal_" + eventId + "_" + begin);
+                                  ev.put("source", "CAL");
+                                  ev.put("title", title != null ? title : "Calendar Event");
+                                  ev.put("text", desc != null ? desc : "");
+                                  ev.put("due", sdf.format(new Date(begin)));
+                                  results.put(ev);
+                              }
+                              cursor.close();
+                              prefs.edit().putString("seen_cal_ids", updatedSeen.toString()).apply();
+                          }
+                      } catch (Exception ignored) {}
+                      return results.toString();
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView != null && webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          }
+          EOF
+
+      - name: Compile Android APK with Gradle
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../CommandCenter-v${{ github.run_number }}.apk
+
+      - name: Publish Numbered APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Android APK Build #${{ github.run_number }}"
+          body: "Tap **CommandCenter-v${{ github.run_number }}.apk** below to install the live in-app camera stream & field-notes build."
+          files: CommandCenter-v${{ github.run_number }}.apk
+          prerelease: false
